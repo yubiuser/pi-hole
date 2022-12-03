@@ -1,4 +1,3 @@
-wheel
 docker-compose
 pytest
 pytest-xdist
