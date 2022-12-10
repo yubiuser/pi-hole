@@ -14,4 +14,5 @@ RUN true && \
 ENV SKIP_INSTALL true
 ENV OS_CHECK_DOMAIN_NAME dev-supportedos.pi-hole.net
 
-#sed '/# Start the installer/Q' /opt/pihole/basic-install.sh > /opt/pihole/stub_basic-install.sh && \
+RUN mkdir -p test/bats_core
+RUN git clone --depth=1 --quiet https://github.com/bats-core/bats-core test/bats_core > /dev/null
