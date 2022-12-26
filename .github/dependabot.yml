@@ -8,5 +8,11 @@ updates:
     time: "10:00"
   open-pull-requests-limit: 10
   target-branch: development
-  reviewers:
-    - "pi-hole/core-maintainers"
+- package-ecosystem: pip
+  directory: "/test"
+  schedule:
+    interval: daily
+    time: "12:15"
+    timezone: "Europe/Berlin"
+  open-pull-requests-limit: 10
+  target-branch: development
