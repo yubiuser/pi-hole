@@ -1,4 +1,3 @@
-docker-compose
 pytest
 pytest-xdist
 pytest-testinfra
