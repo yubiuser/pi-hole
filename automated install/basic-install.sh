@@ -41,7 +41,7 @@ export PATH+=':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 
 # List of supported DNS servers
-DNS_SERVERS=$(cat << EOM
+DNS_SERVERS=$(cat <<EOM
 Google (ECS, DNSSEC);8.8.8.8;8.8.4.4;2001:4860:4860:0:0:0:0:8888;2001:4860:4860:0:0:0:0:8844
 OpenDNS (ECS, DNSSEC);208.67.222.222;208.67.220.220;2620:119:35::35;2620:119:53::53
 Level3;4.2.2.1;4.2.2.2;;
@@ -74,7 +74,7 @@ webroot="/var/www/html"
 # Two notable scripts are gravity.sh (used to generate the HOSTS file) and advanced/Scripts/webpage.sh (used to install the Web admin interface)
 webInterfaceGitUrl="https://github.com/pi-hole/AdminLTE.git"
 webInterfaceDir="${webroot}/admin"
-piholeGitUrl="https://github.com/pi-hole/pi-hole.git"
+piholeGitUrl="https://github.com/yubiuser/pi-hole.git"
 PI_HOLE_LOCAL_REPO="/etc/.pihole"
 # List of pihole scripts, stored in an array
 PI_HOLE_FILES=(chronometer list piholeDebug piholeLogFlush setupLCD update version gravity uninstall webpage)
@@ -381,7 +381,24 @@ package_manager_detect() {
             fi
         fi
 
-    # If neither apt-get or yum/dnf package managers were found
+    elif is_command apk; then
+        # Alpine package manager
+        PKG_MANAGER="apk"
+        # These variable names match the ones for apt-get. See above for an explanation of what they are for.
+        PKG_INSTALL=("${PKG_MANAGER}" add --no-cache)
+        UPDATE_PKG_CACHE="${PKG_MANAGER} update"
+        PKG_COUNT="${PKG_MANAGER} -s upgrade | grep -c Upgrading  || true"
+        # Update package cache
+        update_package_cache || exit 1
+
+        OS_CHECK_DEPS=(grep bind-tools)
+        INSTALLER_DEPS=(git dialog iproute2-ss newt procps bash-completion ca-certificates shadow coreutils ncurses openrc)
+        PIHOLE_DEPS=(cronie curl findutils sudo unzip libidn2 psmisc libcap nmap-ncat jq)
+        PIHOLE_WEB_DEPS=(lighttpd lighttpd-mod_auth php81-common php81-cgi php81-sqlite3 php81-xml php81-intl php81-sockets php81-session php81-openssl openssl)
+        LIGHTTPD_USER="lighttpd"
+        LIGHTTPD_GROUP="www-data"
+
+    # If neither apt-get/yum/dnf/apk package managers were found
     else
         # we cannot install required packages
         printf "  %b No supported package manager found\\n" "${CROSS}"
@@ -1464,6 +1481,14 @@ installConfigs() {
                 printf "  %b Warning: 'lighty-enable-mod' utility not found\\n" "${INFO}"
                 printf "      Please ensure fastcgi is enabled if you experience issues\\n"
             fi
+        elif grep -q "^ID=alpine" /etc/os-release; then
+            # Alpine
+            install -D -m 644 -T ${PI_HOLE_LOCAL_REPO}/advanced/pihole-admin.conf /etc/lighttpd/pihole-admin.conf
+            if grep -q -F 'include "pihole-admin.conf"' "${lighttpdConfig}"; then
+                :
+            else
+                echo 'include "pihole-admin.conf"' >> "${lighttpdConfig}"
+            fi
         else
             # lighttpd config include dir not found
             printf "  %b Warning: lighttpd config include dir not found\\n" "${INFO}"
@@ -1522,6 +1547,9 @@ stop_service() {
     printf "  %b %s..." "${INFO}" "${str}"
     if is_command systemctl ; then
         systemctl stop "${1}" &> /dev/null || true
+    elif is_command rc-service; then
+        # Alpine
+        rc-service "${1}" stop &> /dev/null
     else
         service "${1}" stop &> /dev/null || true
     fi
@@ -1537,6 +1565,9 @@ restart_service() {
     if is_command systemctl ; then
         # use that to restart the service
         systemctl restart "${1}" &> /dev/null
+    elif is_command rc-service; then
+        # Alpine
+        rc-service "${1}" restart
     else
         # Otherwise, fall back to the service command
         service "${1}" restart &> /dev/null
@@ -1553,6 +1584,9 @@ enable_service() {
     if is_command systemctl ; then
         # use that to enable the service
         systemctl enable "${1}" &> /dev/null
+    elif is_command rc-update; then
+        # Alpine
+        rc-update add "${1}" default
     else
         #  Otherwise, use update-rc.d to accomplish this
         update-rc.d "${1}" defaults &> /dev/null
@@ -1569,6 +1603,9 @@ disable_service() {
     if is_command systemctl ; then
         # use that to disable the service
         systemctl disable "${1}" &> /dev/null
+    elif is_command rc-update; then
+        # Alpine
+        rc-update del "${1}" default &> /dev/null
     else
         # Otherwise, use update-rc.d to accomplish this
         update-rc.d "${1}" disable &> /dev/null
@@ -1581,6 +1618,9 @@ check_service_active() {
     if is_command systemctl ; then
         # use that to check the status of the service
         systemctl is-enabled "${1}" &> /dev/null
+    elif is_command rc-status; then
+        # Alpine
+        rc-status default | grep -i "${1}"
     else
         # Otherwise, fall back to service command
         service "${1}" status &> /dev/null
@@ -1644,7 +1684,16 @@ notify_package_updates_available() {
     # Store the list of packages in a variable
     updatesToInstall=$(eval "${PKG_COUNT}")
 
-    if [[ -d "/lib/modules/$(uname -r)" ]]; then
+    local module_dir
+    # set module_dir based on package manager
+    if [ "${PKG_MANAGER}" = "apk" ]; then
+        #Alpine
+        module_dir="/usr/lib/modules"
+    else
+        module_dir="/lib/modules"
+    fi
+
+    if [[ -d "${module_dir}/$(uname -r)" ]]; then
         if [[ "${updatesToInstall}" -eq 0 ]]; then
             printf "%b  %b %s... up to date!\\n\\n" "${OVER}" "${TICK}" "${str}"
         else
@@ -1692,29 +1741,59 @@ install_dependent_packages() {
         fi
         printf "\\n"
         return 0
-    fi
-
-    # Install Fedora/CentOS packages
-    for i in "$@"; do
-        # For each package, check if it's already installed (and if so, don't add it to the installArray)
-        printf "  %b Checking for %s..." "${INFO}" "${i}"
-        if "${PKG_MANAGER}" -q list installed "${i}" &> /dev/null; then
-            printf "%b  %b Checking for %s\\n" "${OVER}" "${TICK}" "${i}"
-        else
-            printf "%b  %b Checking for %s (will be installed)\\n" "${OVER}" "${INFO}" "${i}"
-            installArray+=("${i}")
+    elif is_command rpm ; then
+        # Install Fedora/CentOS packages
+        for i in "$@"; do
+            # For each package, check if it's already installed (and if so, don't add it to the installArray)
+            printf "  %b Checking for %s..." "${INFO}" "${i}"
+            if "${PKG_MANAGER}" -q list installed "${i}" &> /dev/null; then
+                printf "%b  %b Checking for %s\\n" "${OVER}" "${TICK}" "${i}"
+            else
+                printf "%b  %b Checking for %s (will be installed)\\n" "${OVER}" "${INFO}" "${i}"
+                installArray+=("${i}")
+            fi
+        done
+        # If there's anything to install, install everything in the list.
+        if [[ "${#installArray[@]}" -gt 0 ]]; then
+            printf "  %b Processing %s install(s) for: %s, please wait...\\n" "${INFO}" "${PKG_MANAGER}" "${installArray[*]}"
+            printf '%*s\n' "${c}" '' | tr " " -;
+            "${PKG_INSTALL[@]}" "${installArray[@]}"
+            printf '%*s\n' "${c}" '' | tr " " -;
+            return
         fi
-    done
-    # If there's anything to install, install everything in the list.
-    if [[ "${#installArray[@]}" -gt 0 ]]; then
-        printf "  %b Processing %s install(s) for: %s, please wait...\\n" "${INFO}" "${PKG_MANAGER}" "${installArray[*]}"
-        printf '%*s\n' "${c}" '' | tr " " -;
-        "${PKG_INSTALL[@]}" "${installArray[@]}"
-        printf '%*s\n' "${c}" '' | tr " " -;
-        return
+        printf "\\n"
+        return 0
+    elif is_command apk ; then
+        # Install Alpine packages
+        for i in "$@"; do
+            # For each package, check if it's already installed (and if so, don't add it to the installArray)
+            printf "  %b Checking for %s..." "${INFO}" "${i}"
+            if "${PKG_MANAGER}" -e info "${i}" &> /dev/null; then
+                printf "%b  %b Checking for %s\\n" "${OVER}" "${TICK}" "${i}"
+            else
+                printf "%b  %b Checking for %s (will be installed)\\n" "${OVER}" "${INFO}" "${i}"
+                installArray+=("${i}")
+            fi
+        done
+        # If there's anything to install, install everything in the list.
+        if [[ "${#installArray[@]}" -gt 0 ]]; then
+            printf "  %b Processing %s install(s) for: %s, please wait...\\n" "${INFO}" "${PKG_MANAGER}" "${installArray[*]}"
+            printf '%*s\n' "${c}" '' | tr " " -;
+            "${PKG_INSTALL[@]}" "${installArray[@]}"
+            printf '%*s\n' "${c}" '' | tr " " -;
+
+            # Initialize openrc if we installed it
+            if [[ "${installArray[*]}" =~ "openrc" ]] && [[ ! -f /run/openrc/softlevel ]]; then
+                openrc
+                mkdir -p /run/openrc
+                touch /run/openrc/softlevel
+            fi
+            return
+        fi
+
+        printf "\\n"
+        return 0
     fi
-    printf "\\n"
-    return 0
 }
 
 # Install the Web interface dashboard
@@ -2192,6 +2271,7 @@ clone_or_update_repos() {
         { printf "  %b Unable to clone %s into %s, unable to continue%b\\n" "${COL_LIGHT_RED}" "${piholeGitUrl}" "${PI_HOLE_LOCAL_REPO}" "${COL_NC}"; \
         exit 1; \
         }
+        fetch_checkout_pull_branch ${PI_HOLE_LOCAL_REPO} alpine
         # If the Web interface was installed,
         if [[ "${INSTALL_WEB_INTERFACE}" == true ]]; then
             # get the Web git files
@@ -2360,6 +2440,9 @@ get_binary_name() {
         if [[ "${dpkgarch}" == "i386" ]]; then
             printf "%b  %b Detected 32bit (i686) processor\\n" "${OVER}" "${TICK}"
             l_binary="pihole-FTL-linux-x86_32"
+        elif ldd /bin/sh | grep -q "ld-musl-x86_64"; then
+            printf "%b  %b Detected musl-x86_64 architecture\\n" "${OVER}" "${TICK}"
+            l_binary="pihole-FTL-musl-linux-x86_64"
         else
             # 64bit
             printf "%b  %b Detected x86_64 processor\\n" "${OVER}" "${TICK}"
