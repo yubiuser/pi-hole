@@ -23,7 +23,7 @@ Pi-hole : A black-hole for internet advertisements
 .br
 pihole -r
 .br
-pihole -t
+\fBpihole\fR \fB-t\fR [arg]
 .br
 pihole -g\fR
 .br
@@ -113,9 +113,13 @@ Available commands and options:
     Reconfigure or Repair Pi-hole subsystems
 .br
 
-\fB-t, tail\fR
+\fB-t, tail\fR [arg]
 .br
     View the live output of the Pi-hole log
+.br
+
+      [arg]             Optional argument to filter the log for
+                        (regular expressions are supported)
 .br
 
 \fB-a, admin\fR [options]
@@ -180,7 +184,7 @@ Available commands and options:
     Specify whether the Pi-hole log should be used
 .br
 
-	(Logging options):
+    (Logging options):
 .br
       on                Enable the Pi-hole log at /var/log/pihole/pihole.log
 .br
@@ -208,7 +212,7 @@ Available commands and options:
 .br
       -p, --pihole      Only retrieve info regarding Pi-hole repository
 .br
-      -a, --admin       Only retrieve info regarding AdminLTE
+      -a, --admin       Only retrieve info regarding web
                         repository
 .br
       -f, --ftl         Only retrieve info regarding FTL repository
@@ -335,7 +339,7 @@ Displaying version information
 
 \fBpihole -v -a -c\fR
 .br
-    Display the current version of AdminLTE
+    Display the current version of web
 .br
 
 Temporarily disabling Pi-hole

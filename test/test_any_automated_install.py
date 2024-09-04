@@ -70,7 +70,7 @@ def test_setupVars_are_sourced_to_global_scope(host):
 
 def test_setupVars_saved_to_file(host):
     """
-    confirm saved settings are written to a file for future updates to re-use
+    confirm saved settings are written to a file for future updates to reuse
     """
     # dedent works better with this and padding matching script below
     set_setup_vars = "\n"
@@ -136,15 +136,9 @@ def test_installPiholeWeb_fresh_install_no_errors(host):
 def get_directories_recursive(host, directory):
     if directory is None:
         return directory
-    ls = host.run("ls -d {}".format(directory + "/*/"))
-    directories = list(filter(bool, ls.stdout.splitlines()))
-    dirs = directories
-    for dirval in directories:
-        dir_rec = get_directories_recursive(host, dirval)
-        if isinstance(dir_rec, str):
-            dirs.extend([dir_rec])
-        else:
-            dirs.extend(dir_rec)
+    # returns all non-hidden subdirs of 'directory'
+    dirs_raw = host.run("find {} -type d -not -path '*/.*'".format(directory))
+    dirs = list(filter(bool, dirs_raw.stdout.splitlines()))
     return dirs
 
 
@@ -182,6 +176,12 @@ def test_installPihole_fresh_install_readableFiles(host):
     setup_var_file += "INSTALL_WEB_INTERFACE=true\n"
     setup_var_file += "EOF\n"
     host.run(setup_var_file)
+    # Install FTL's development branch to get the latest features
+    host.run(
+        """
+    echo "development" > /etc/pihole/ftlbranch
+    """
+    )
     install = host.run(
         """
     export TERM=xterm
@@ -437,6 +437,12 @@ def test_installPihole_fresh_install_readableBlockpage(host, test_webpage):
     setup_var_file += "INSTALL_WEB_INTERFACE=true\n"
     setup_var_file += "EOF\n"
     host.run(setup_var_file)
+    # Install FTL's development branch to get the latest features
+    host.run(
+        """
+    echo "development" > /etc/pihole/ftlbranch
+    """
+    )
     installWeb = host.run(
         """
     export TERM=xterm
@@ -520,7 +526,7 @@ def test_installPihole_fresh_install_readableBlockpage(host, test_webpage):
     check_admin = test_cmd.format("x", webroot + "/admin", webuser)
     actual_rc = host.run(check_admin).rc
     assert exit_status_success == actual_rc
-    directories = get_directories_recursive(host, webroot + "/admin/*/")
+    directories = get_directories_recursive(host, webroot + "/admin/")
     for directory in directories:
         check_pihole = test_cmd.format("r", directory, webuser)
         actual_rc = host.run(check_pihole).rc
@@ -1157,3 +1163,30 @@ def test_package_manager_has_web_deps(host):
 
     assert "No package" not in output.stdout
     assert output.rc == 0
+
+
+def test_webpage_sh_valid_domain(host):
+    """Confirms checkDomain function in webpage.sh works as expected"""
+    check1 = host.run(
+        """
+    source /opt/pihole/webpage.sh
+    checkDomain "pi-hole.net"
+    """
+    )
+    check2 = host.run(
+        """
+    source /opt/pihole/webpage.sh
+    checkDomain "ab.pi-hole.net"
+    """
+    )
+
+    check3 = host.run(
+        """
+    source /opt/pihole/webpage.sh
+    checkDomain "abc.pi-hole.net"
+    """
+    )
+
+    assert "pi-hole.net" in check1.stdout
+    assert "ab.pi-hole.net" in check2.stdout
+    assert "abc.pi-hole.net" in check3.stdout

@@ -1,5 +1,4 @@
-FROM fedora:37
-RUN dnf install -y git initscripts
+FROM buildpack-deps:bookworm-scm
 
 ENV GITDIR /etc/.pihole
 ENV SCRIPTDIR /opt/pihole

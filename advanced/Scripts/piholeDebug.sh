@@ -66,6 +66,8 @@ RUN_DIRECTORY="/run"
 LOG_DIRECTORY="/var/log/pihole"
 WEB_SERVER_LOG_DIRECTORY="/var/log/lighttpd"
 WEB_SERVER_CONFIG_DIRECTORY="/etc/lighttpd"
+WEB_SERVER_CONFIG_DIRECTORY_FEDORA="${WEB_SERVER_CONFIG_DIRECTORY}/conf.d"
+WEB_SERVER_CONFIG_DIRECTORY_DEBIAN="${WEB_SERVER_CONFIG_DIRECTORY}/conf-enabled"
 HTML_DIRECTORY="/var/www/html"
 WEB_GIT_DIRECTORY="${HTML_DIRECTORY}/admin"
 SHM_DIRECTORY="/dev/shm"
@@ -77,6 +79,8 @@ PIHOLE_CRON_FILE="${CRON_D_DIRECTORY}/pihole"
 
 WEB_SERVER_CONFIG_FILE="${WEB_SERVER_CONFIG_DIRECTORY}/lighttpd.conf"
 WEB_SERVER_CUSTOM_CONFIG_FILE="${WEB_SERVER_CONFIG_DIRECTORY}/external.conf"
+WEB_SERVER_PIHOLE_CONFIG_FILE_DEBIAN="${WEB_SERVER_CONFIG_DIRECTORY_DEBIAN}/15-pihole-admin.conf"
+WEB_SERVER_PIHOLE_CONFIG_FILE_FEDORA="${WEB_SERVER_CONFIG_DIRECTORY_FEDORA}/pihole-admin.conf"
 
 PIHOLE_INSTALL_LOG_FILE="${PIHOLE_DIRECTORY}/install.log"
 PIHOLE_RAW_BLOCKLIST_FILES="${PIHOLE_DIRECTORY}/list.*"
@@ -140,6 +144,8 @@ PIHOLE_PROCESSES=( "lighttpd" "pihole-FTL" )
 REQUIRED_FILES=("${PIHOLE_CRON_FILE}"
 "${WEB_SERVER_CONFIG_FILE}"
 "${WEB_SERVER_CUSTOM_CONFIG_FILE}"
+"${WEB_SERVER_PIHOLE_CONFIG_FILE_DEBIAN}"
+"${WEB_SERVER_PIHOLE_CONFIG_FILE_FEDORA}"
 "${PIHOLE_INSTALL_LOG_FILE}"
 "${PIHOLE_RAW_BLOCKLIST_FILES}"
 "${PIHOLE_LOCAL_HOSTS_FILE}"
@@ -224,10 +230,8 @@ initialize_debug() {
 
 # This is a function for visually displaying the current test that is being run.
 # Accepts one variable: the name of what is being diagnosed
-# Colors do not show in the dasboard, but the icons do: [i], [✓], and [✗]
 echo_current_diagnostic() {
     # Colors are used for visually distinguishing each test in the output
-    # These colors do not show in the GUI, but the formatting will
     log_write "\\n${COL_PURPLE}*** [ DIAGNOSING ]:${COL_NC} ${1}"
 }
 
@@ -445,7 +449,7 @@ os_check() {
 }
 
 diagnose_operating_system() {
-    # error message in a variable so we can easily modify it later (or re-use it)
+    # error message in a variable so we can easily modify it later (or reuse it)
     local error_msg="Distribution unknown -- most likely you are on an unsupported platform and may run into issues."
     # Display the current test that is running
     echo_current_diagnostic "Operating system"
@@ -857,11 +861,15 @@ dig_at() {
         local record_type="A"
     fi
 
-    # Find a random blocked url that has not been whitelisted.
+    # Find a random blocked url that has not been whitelisted and is not ABP style.
     # This helps emulate queries to different domains that a user might query
     # It will also give extra assurance that Pi-hole is correctly resolving and blocking domains
     local random_url
-    random_url=$(pihole-FTL sqlite3 "${PIHOLE_GRAVITY_DB_FILE}" "SELECT domain FROM vw_gravity ORDER BY RANDOM() LIMIT 1")
+    random_url=$(pihole-FTL sqlite3 -ni "${PIHOLE_GRAVITY_DB_FILE}" "SELECT domain FROM vw_gravity WHERE domain not like '||%^' ORDER BY RANDOM() LIMIT 1")
+    # Fallback if no non-ABP style domains were found
+    if [ -z "${random_url}" ]; then
+        random_url="flurry.com"
+    fi
 
     # Next we need to check if Pi-hole can resolve a domain when the query is sent to it's IP address
     # This better emulates how clients will interact with Pi-hole as opposed to above where Pi-hole is
@@ -977,6 +985,20 @@ ftl_full_status(){
     fi
 }
 
+lighttpd_test_configuration(){
+    # let lighttpd test it's own configuration
+    local lighttpd_conf_test
+    echo_current_diagnostic "Lighttpd configuration test"
+    lighttpd_conf_test=$(lighttpd -tt -f /etc/lighttpd/lighttpd.conf)
+    if [ -z "${lighttpd_conf_test}" ]; then
+        # empty output
+        log_write "${TICK} ${COL_GREEN}No error in lighttpd configuration${COL_NC}"
+    else
+        log_write "${CROSS} ${COL_RED}Error in lighttpd configuration${COL_NC}"
+        log_write "   ${lighttpd_conf_test}"
+    fi
+}
+
 make_array_from_file() {
     local filename="${1}"
     # The second argument can put a limit on how many line should be read from the file
@@ -1069,10 +1091,13 @@ dir_check() {
         # check if exists first; if it does,
         if ls "${filename}" 1> /dev/null 2>&1; then
             # do nothing
-            :
+            true
+            return
         else
             # Otherwise, show an error
             log_write "${COL_RED}${directory} does not exist.${COL_NC}"
+            false
+            return
         fi
     done
 }
@@ -1080,6 +1105,19 @@ dir_check() {
 list_files_in_dir() {
     # Set the first argument passed to this function as a named variable for better readability
     local dir_to_parse="${1}"
+
+    # show files and sizes of some directories, don't print the file content (yet)
+    if [[ "${dir_to_parse}" == "${SHM_DIRECTORY}" ]]; then
+        # SHM file - we do not want to see the content, but we want to see the files and their sizes
+        log_write "$(ls -lh "${dir_to_parse}/")"
+    elif [[ "${dir_to_parse}" == "${WEB_SERVER_CONFIG_DIRECTORY_FEDORA}" ]]; then
+        # we want to see all files files in /etc/lighttpd/conf.d
+        log_write "$(ls -lh "${dir_to_parse}/" 2> /dev/null )"
+    elif [[ "${dir_to_parse}" == "${WEB_SERVER_CONFIG_DIRECTORY_DEBIAN}" ]]; then
+        # we want to see all files files in /etc/lighttpd/conf.d
+        log_write "$(ls -lh "${dir_to_parse}/"/ 2> /dev/null )"
+    fi
+
     # Store the files found in an array
     mapfile -t files_found < <(ls "${dir_to_parse}")
     # For each file in the array,
@@ -1095,11 +1133,8 @@ list_files_in_dir() {
             [[ "${dir_to_parse}/${each_file}" == "${PIHOLE_WEB_SERVER_ACCESS_LOG_FILE}" ]] || \
             [[ "${dir_to_parse}/${each_file}" == "${PIHOLE_LOG_GZIPS}" ]]; then
             :
-        elif [[ "${dir_to_parse}" == "${SHM_DIRECTORY}" ]]; then
-            # SHM file - we do not want to see the content, but we want to see the files and their sizes
-            log_write "$(ls -lhd "${dir_to_parse}"/"${each_file}")"
         elif [[ "${dir_to_parse}" == "${DNSMASQ_D_DIRECTORY}" ]]; then
-            # in case of the dnsmasq directory inlcuede all files in the debug output
+            # in case of the dnsmasq directory include all files in the debug output
             log_write "\\n${COL_GREEN}$(ls -lhd "${dir_to_parse}"/"${each_file}")${COL_NC}"
             make_array_from_file "${dir_to_parse}/${each_file}"
         else
@@ -1132,9 +1167,10 @@ show_content_of_files_in_dir() {
     # Set a local variable for better readability
     local directory="${1}"
     # Check if the directory exists
-    dir_check "${directory}"
-    # if it does, list the files in it
-    list_files_in_dir "${directory}"
+    if dir_check "${directory}"; then
+        # if it does, list the files in it
+        list_files_in_dir "${directory}"
+    fi
 }
 
 show_content_of_pihole_files() {
@@ -1142,6 +1178,8 @@ show_content_of_pihole_files() {
     show_content_of_files_in_dir "${PIHOLE_DIRECTORY}"
     show_content_of_files_in_dir "${DNSMASQ_D_DIRECTORY}"
     show_content_of_files_in_dir "${WEB_SERVER_CONFIG_DIRECTORY}"
+    show_content_of_files_in_dir "${WEB_SERVER_CONFIG_DIRECTORY_FEDORA}"
+    show_content_of_files_in_dir "${WEB_SERVER_CONFIG_DIRECTORY_DEBIAN}"
     show_content_of_files_in_dir "${CRON_D_DIRECTORY}"
     show_content_of_files_in_dir "${WEB_SERVER_LOG_DIRECTORY}"
     show_content_of_files_in_dir "${LOG_DIRECTORY}"
@@ -1188,7 +1226,7 @@ show_db_entries() {
     IFS=$'\r\n'
     local entries=()
     mapfile -t entries < <(\
-        pihole-FTL sqlite3 "${PIHOLE_GRAVITY_DB_FILE}" \
+        pihole-FTL sqlite3 -ni "${PIHOLE_GRAVITY_DB_FILE}" \
             -cmd ".headers on" \
             -cmd ".mode column" \
             -cmd ".width ${widths}" \
@@ -1213,7 +1251,7 @@ show_FTL_db_entries() {
     IFS=$'\r\n'
     local entries=()
     mapfile -t entries < <(\
-        pihole-FTL sqlite3 "${PIHOLE_FTL_DB_FILE}" \
+        pihole-FTL sqlite3 -ni "${PIHOLE_FTL_DB_FILE}" \
             -cmd ".headers on" \
             -cmd ".mode column" \
             -cmd ".width ${widths}" \
@@ -1279,7 +1317,7 @@ analyze_gravity_list() {
     fi
 
     show_db_entries "Info table" "SELECT property,value FROM info" "20 40"
-    gravity_updated_raw="$(pihole-FTL sqlite3 "${PIHOLE_GRAVITY_DB_FILE}" "SELECT value FROM info where property = 'updated'")"
+    gravity_updated_raw="$(pihole-FTL sqlite3 -ni "${PIHOLE_GRAVITY_DB_FILE}" "SELECT value FROM info where property = 'updated'")"
     gravity_updated="$(date -d @"${gravity_updated_raw}")"
     log_write "   Last gravity run finished at: ${COL_CYAN}${gravity_updated}${COL_NC}"
     log_write ""
@@ -1287,7 +1325,7 @@ analyze_gravity_list() {
     OLD_IFS="$IFS"
     IFS=$'\r\n'
     local gravity_sample=()
-    mapfile -t gravity_sample < <(pihole-FTL sqlite3 "${PIHOLE_GRAVITY_DB_FILE}" "SELECT domain FROM vw_gravity LIMIT 10")
+    mapfile -t gravity_sample < <(pihole-FTL sqlite3 -ni "${PIHOLE_GRAVITY_DB_FILE}" "SELECT domain FROM vw_gravity LIMIT 10")
     log_write "   ${COL_CYAN}----- First 10 Gravity Domains -----${COL_NC}"
 
     for line in "${gravity_sample[@]}"; do
@@ -1319,7 +1357,7 @@ database_integrity_check(){
 
       log_write "${INFO} Checking foreign key constraints of ${database} ... (this can take several minutes)"
       unset result
-      result="$(pihole-FTL sqlite3 "${database}" -cmd ".headers on" -cmd ".mode column" "PRAGMA foreign_key_check" 2>&1 & spinner)"
+      result="$(pihole-FTL sqlite3 -ni "${database}" -cmd ".headers on" -cmd ".mode column" "PRAGMA foreign_key_check" 2>&1 & spinner)"
       if [[ -z ${result} ]]; then
         log_write "${TICK} No foreign key errors in ${database}"
       else
@@ -1465,7 +1503,7 @@ upload_to_tricorder() {
     # If no token was generated
     else
         # Show an error and some help instructions
-        # Skip this if being called from web interface and autmatic mode was not chosen (users opt-out to upload)
+        # Skip this if being called from web interface and automatic mode was not chosen (users opt-out to upload)
         if [[ "${WEBCALL}" ]] && [[ ! "${AUTOMATED}" ]]; then
             :
         else
@@ -1496,6 +1534,7 @@ check_name_resolution
 check_dhcp_servers
 process_status
 ftl_full_status
+lighttpd_test_configuration
 parse_setup_vars
 check_x_headers
 analyze_ftl_db

@@ -68,11 +68,11 @@ webroot="/var/www/html"
 
 
 # We clone (or update) two git repositories during the install. This helps to make sure that we always have the latest versions of the relevant files.
-# AdminLTE is used to set up the Web admin interface.
+# web is used to set up the Web admin interface.
 # Pi-hole contains various setup scripts and files which are critical to the installation.
 # Search for "PI_HOLE_LOCAL_REPO" in this file to see all such scripts.
 # Two notable scripts are gravity.sh (used to generate the HOSTS file) and advanced/Scripts/webpage.sh (used to install the Web admin interface)
-webInterfaceGitUrl="https://github.com/pi-hole/AdminLTE.git"
+webInterfaceGitUrl="https://github.com/pi-hole/web.git"
 webInterfaceDir="${webroot}/admin"
 piholeGitUrl="https://github.com/pi-hole/pi-hole.git"
 PI_HOLE_LOCAL_REPO="/etc/.pihole"
@@ -334,7 +334,7 @@ package_manager_detect() {
         # Packages required for the Web admin interface (stored as an array)
         # It's useful to separate this from Pi-hole, since the two repos are also setup separately
         PIHOLE_WEB_DEPS=(lighttpd "${phpVer}-common" "${phpVer}-cgi" "${phpVer}-sqlite3" "${phpVer}-xml" "${phpVer}-intl")
-        # Prior to PHP8.0, JSON functionality is provided as dedicated module, required by Pi-hole AdminLTE: https://www.php.net/manual/json.installation.php
+        # Prior to PHP8.0, JSON functionality is provided as dedicated module, required by Pi-hole web: https://www.php.net/manual/json.installation.php
         if [[ -z "${phpInsMajor}" || "${phpInsMajor}" -lt 8 ]]; then
             PIHOLE_WEB_DEPS+=("${phpVer}-json")
         fi
@@ -357,7 +357,7 @@ package_manager_detect() {
         # These variable names match the ones for apt-get. See above for an explanation of what they are for.
         PKG_INSTALL=("${PKG_MANAGER}" install -y)
         # CentOS package manager returns 100 when there are packages to update so we need to || true to prevent the script from exiting.
-        PKG_COUNT="${PKG_MANAGER} check-update | grep -E '(.i686|.x86|.noarch|.arm|.src)' | wc -l || true"
+        PKG_COUNT="${PKG_MANAGER} check-update | grep -E '(.i686|.x86|.noarch|.arm|.src|.riscv64)' | wc -l || true"
         OS_CHECK_DEPS=(grep bind-utils)
         INSTALLER_DEPS=(git dialog iproute newt procps-ng chkconfig ca-certificates)
         PIHOLE_DEPS=(cronie curl findutils sudo unzip libidn2 psmisc libcap nmap-ncat jq)
@@ -1400,12 +1400,19 @@ installConfigs() {
 
     # If the user chose to install the dashboard,
     if [[ "${INSTALL_WEB_SERVER}" == true ]]; then
-        if grep -q -F "FILE AUTOMATICALLY OVERWRITTEN BY PI-HOLE" "${lighttpdConfig}"; then
+        # set permissions on /etc/lighttpd/lighttpd.conf so pihole user (other) can read the file
+        chmod o+x /etc/lighttpd
+        chmod o+r "${lighttpdConfig}"
+
+        # Ensure /run/lighttpd exists and is owned by lighttpd user
+        # Needed for the php socket
+        mkdir -p /run/lighttpd
+        chown ${LIGHTTPD_USER}:${LIGHTTPD_GROUP} /run/lighttpd
+
+        if grep -q -F "OVERWRITTEN BY PI-HOLE" "${lighttpdConfig}"; then
             # Attempt to preserve backwards compatibility with older versions
             install -D -m 644 -T ${PI_HOLE_LOCAL_REPO}/advanced/${LIGHTTPD_CFG} "${lighttpdConfig}"
             # Make the directories if they do not exist and set the owners
-            mkdir -p /run/lighttpd
-            chown ${LIGHTTPD_USER}:${LIGHTTPD_GROUP} /run/lighttpd
             mkdir -p /var/cache/lighttpd/compress
             chown ${LIGHTTPD_USER}:${LIGHTTPD_GROUP} /var/cache/lighttpd/compress
             mkdir -p /var/cache/lighttpd/uploads
@@ -1432,17 +1439,26 @@ installConfigs() {
         elif [[ -d "/etc/lighttpd/conf-available" ]]; then
             conf=/etc/lighttpd/conf-available/15-pihole-admin.conf
             install -D -m 644 -T ${PI_HOLE_LOCAL_REPO}/advanced/pihole-admin.conf $conf
-            # disable server.modules += ( ... ) in $conf to avoid module dups
-            # (needed until Debian 10 no longer supported by pi-hole)
-            # (server.modules duplication is ignored in lighttpd 1.4.56+)
-            if awk '!/^server\.modules/{print}' $conf > $conf.$$ && mv $conf.$$ $conf; then
+
+            # Get the version number of lighttpd
+            version=$(dpkg-query -f='${Version}\n' --show lighttpd)
+            # Test if that version is greater than or equal to 1.4.56
+            if dpkg --compare-versions "$version" "ge" "1.4.56"; then
+                # If it is, then we don't need to disable the modules
+                # (server.modules duplication is ignored in lighttpd 1.4.56+)
                 :
             else
-                rm $conf.$$
+                # disable server.modules += ( ... ) in $conf to avoid module dups
+                if awk '!/^server\.modules/{print}' $conf > $conf.$$ && mv $conf.$$ $conf; then
+                :
+                else
+                    rm $conf.$$
+                fi
             fi
+
             chmod 644 $conf
             if is_command lighty-enable-mod ; then
-                lighty-enable-mod pihole-admin access redirect fastcgi setenv > /dev/null || true
+                lighty-enable-mod pihole-admin access accesslog redirect fastcgi setenv > /dev/null || true
             else
                 # Otherwise, show info about installing them
                 printf "  %b Warning: 'lighty-enable-mod' utility not found\\n" "${INFO}"
@@ -2350,6 +2366,9 @@ get_binary_name() {
             # set the binary to be used
             l_binary="pihole-FTL-linux-x86_64"
         fi
+    elif [[ "${machine}" == "riscv64" ]]; then
+        printf "%b  %b Detected riscv64 processor\\n" "${OVER}" "${TICK}"
+        l_binary="pihole-FTL-riscv64-linux-gnu"
     else
         # Something else - we try to use 32bit executable and warn the user
         if [[ ! "${machine}" == "i686" ]]; then
@@ -2596,7 +2615,8 @@ main() {
 
         # Get the privacy level if it exists (default is 0)
         if [[ -f "${FTL_CONFIG_FILE}" ]]; then
-            PRIVACY_LEVEL=$(sed -ne 's/PRIVACYLEVEL=\(.*\)/\1/p' "${FTL_CONFIG_FILE}")
+            # get the value from $FTL_CONFIG_FILE (and ignoring all commented lines)
+            PRIVACY_LEVEL=$(sed -e '/^[[:blank:]]*#/d' "${FTL_CONFIG_FILE}" | grep "PRIVACYLEVEL" | awk -F "=" 'NR==1{printf$2}')
 
             # If no setting was found, default to 0
             PRIVACY_LEVEL="${PRIVACY_LEVEL:-0}"
@@ -2665,7 +2685,7 @@ main() {
     # Check for and disable systemd-resolved-DNSStubListener before reloading resolved
     # DNSStubListener needs to remain in place for installer to download needed files,
     # so this change needs to be made after installation is complete,
-    # but before starting or resarting the dnsmasq or ftl services
+    # but before starting or restarting the dnsmasq or ftl services
     disable_resolved_stublistener
 
     # If the Web server was installed,
